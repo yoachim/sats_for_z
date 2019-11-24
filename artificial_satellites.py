@@ -1,20 +1,26 @@
 ## Coppied over from lsst.sims.featureScheduler branch u/yoachim/satellite_dodging
 
-import datetime
 import numpy as np
 from astropy import time
 from astropy import units as u
 from astropy import constants as const
-from astropy.coordinates import EarthLocation
 import ephem
-from lsst.sims.utils import _angularSeparation, _buildTree, _xyz_from_ra_dec, xyz_angular_radius
-from lsst.sims.featureScheduler.utils import read_fields, gnomonic_project_toxy
+#from lsst.sims.featureScheduler.utils import read_fields, gnomonic_project_toxy
 import healpy as hp
 
 
 __all__ = ["tle_from_orbital_parameters", "create_constellation",
            "starlink_constellation", "Constellation", "Constellation_p"]
 
+
+def gnomonic_project_toxy(RA1, Dec1, RAcen, Deccen):
+    """Calculate x/y projection of RA1/Dec1 in system with center at RAcen, Deccen.
+    Input radians. Grabbed from sims_selfcal"""
+    # also used in Global Telescope Network website
+    cosc = np.sin(Deccen) * np.sin(Dec1) + np.cos(Deccen) * np.cos(Dec1) * np.cos(RA1-RAcen)
+    x = np.cos(Dec1) * np.sin(RA1-RAcen) / cosc
+    y = (np.cos(Deccen)*np.sin(Dec1) - np.sin(Deccen)*np.cos(Dec1)*np.cos(RA1-RAcen)) / cosc
+    return x, y
 
 def satellite_mean_motion(altitude, mu=const.GM_earth, r_earth=const.R_earth):
     '''
@@ -163,7 +169,7 @@ class Constellation(object):
         The time step to use when computing satellite positions in an exposure
     """
 
-    def __init__(self, sat_tle_list, alt_limit=20., fov=3.5, tstep=1., exptime=30.):
+    def __init__(self, sat_tle_list, alt_limit=20., fov=3.5):
         self.sat_list = [ephem.readtle(tle.split('\n')[0], tle.split('\n')[1], tle.split('\n')[2]) for tle in sat_tle_list]
         self.alt_limit_rad = np.radians(alt_limit)
         self.fov_rad = np.radians(fov)
@@ -175,15 +181,11 @@ class Constellation(object):
 
     def _make_observer(self):
         #telescope = Site(name='LSST')
-        telescope = {}
-        telescope.latitude_rad = -0.527864360290173
-        telescope.longitude_rad = -1.234809973810476
-        telescope.height = 2650.0
 
         self.observer = ephem.Observer()
-        self.observer.lat = telescope.latitude_rad
-        self.observer.lon = telescope.longitude_rad
-        self.observer.elevation = telescope.height
+        self.observer.lat = -0.527864360290173
+        self.observer.lon = -1.234809973810476
+        self.observer.elevation = 2650.0
 
     def advance_epoch(self, advance=100):
         """
@@ -205,6 +207,10 @@ class Constellation(object):
         self.altitudes_rad = []
         self.azimuth_rad = []
         self.eclip = []
+        self.ras_rad = []
+        self.decs_rad = []
+        self.elevations = []
+
         for sat in self.sat_list:
             try:
                 sat.compute(self.observer)
@@ -214,6 +220,9 @@ class Constellation(object):
             self.altitudes_rad.append(sat.alt)
             self.azimuth_rad.append(sat.az)
             self.eclip.append(sat.eclipsed)
+            self.ras_rad.append(sat.ra)
+            self.decs_rad.append(sat.dec)
+            self.elevations.append(sat.elevation)
 
         self.altitudes_rad = np.array(self.altitudes_rad)
         self.azimuth_rad = np.array(self.azimuth_rad)
@@ -221,7 +230,22 @@ class Constellation(object):
         # Keep track of the ones that are up and illuminated
         self.above_alt_limit = np.where((self.altitudes_rad >= self.alt_limit_rad) & (self.eclip == False))[0]
 
-    
+    def return_sat_info(self, mjd=None):
+        """
+        Package up the information about the satellites as a numpy array
+        """
+
+        if mjd is not None:
+            self.update_mjd(mjd)
+
+        names = ['altitudes_rad', 'azimuth_rad', 'eclip', 'ras_rad', 'decs_rad', 'elevations']
+        types = [float, float, bool, float, float, float]
+        result = np.empty(self.altitudes_rad.size, dtype=list(zip(names, types)))
+        for name in names:
+            result[name] = getattr(self, name)
+
+        return result
+
     def check_times(self, pointing_alt, pointing_az, mjd1, mjd2):
         """
         pointing_alt : float
@@ -237,7 +261,7 @@ class Constellation(object):
         -------
         0 if there are no satellite collisions, 1 if there is
         """
-        # Let's make sure nothing intercepts
+        
         result = 0
         self._alt_check(pointing_alt)
 
@@ -322,5 +346,4 @@ class Constellation_p(Constellation):
         results[np.where(results > 0)] = 1
 
         return results
-
 
